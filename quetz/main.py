@@ -4,7 +4,7 @@
 from typing import List, Optional
 from fastapi import Depends, FastAPI, HTTPException, status, Request, File, UploadFile, APIRouter,\
     Form
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 
 from starlette.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
@@ -19,8 +19,8 @@ import sys
 import json
 import subprocess
 
-from quetz import config
 from quetz import auth_github
+from quetz.config import Config
 from quetz.dao import Dao
 from quetz.database import get_session as get_db_session
 from quetz import rest_models
@@ -32,8 +32,8 @@ from quetz import repo_data
 
 app = FastAPI()
 
-config.load_configs()
-auth_github.register()
+config = Config()
+auth_github.register(config)
 
 app.add_middleware(
     SessionMiddleware,
@@ -42,12 +42,14 @@ app.add_middleware(
 
 api_router = APIRouter()
 
+pkgstore = config.get_package_store()
+
 app.include_router(auth_github.router)
 
 # Dependency injection
 
 def get_db():
-    db = get_db_session()
+    db = get_db_session(config.sqlalchemy_database_url)
     try:
         yield db
     finally:
@@ -394,8 +396,6 @@ def post_file(
 
 
 def handle_package_files(channel_name, files, dao, auth, force, package=None):
-    channel_dir = f'channels/{channel_name}'
-
     if force:
         auth.assert_overwrite_package_version(channel_name)
 
@@ -444,14 +444,15 @@ def handle_package_files(channel_name, files, dao, auth, force, package=None):
                 raise HTTPException(status_code=status.HTTP_409_CONFLICT,
                                     detail="Duplicate")
 
-        dir = f'{channel_dir}/{condainfo.info["subdir"]}/'
-        os.makedirs(dir, exist_ok=True)
+        pkgstore.create_channel(channel_name)
 
+        dest = os.path.join(condainfo.info["subdir"], file.filename)
         file.file._file.seek(0)
-        with open(f'{dir}/{file.filename}', 'wb') as my_file:
-            shutil.copyfileobj(file.file, my_file)
+        pkgstore.add_package(channel_name, file.file, dest)
 
-    subprocess.run(['conda', 'index', channel_dir])
+    # TODO:
+    # subprocess.run(['conda', 'index', channel_dir])
+
 
 # Test code
 @api_router.get('/channeldata/{channel_name}')
@@ -472,8 +473,6 @@ def get_repodata(channel: db_models.Channel = Depends(get_channel_or_fail),
             detail=f'Platform {subdir} not found')
 
 
-
-
 app.include_router(
     api_router,
     prefix="/api",
@@ -484,7 +483,16 @@ def invalid_api():
     return None
 
 
-app.mount("/channels", StaticFiles(directory='channels', html=True), name="channels")
+@app.get("/channels/{channel_name}/{package:path}")
+def serve_package(
+        package,
+        channel: db_models.Channel = Depends(get_channel_or_fail)):
+    try:
+        return StreamingResponse(pkgstore.serve_package(channel.name, package))
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f'{channel.name}/{package} not found')
 
 
 if os.path.isfile('quetz_frontend/dist/index.html'):

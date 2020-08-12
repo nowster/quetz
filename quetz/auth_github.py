@@ -14,7 +14,7 @@ router = APIRouter()
 oauth = OAuth()
 
 
-def register():
+def register(config):
     # Register the app here: https://github.com/settings/applications/new
     oauth.register(
         name='github',
