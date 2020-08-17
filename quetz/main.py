@@ -2,8 +2,8 @@
 # Distributed under the terms of the Modified BSD License.
 
 from typing import List, Optional
-from fastapi import Depends, FastAPI, HTTPException, status, Request, File, UploadFile, APIRouter,\
-    Form
+from fastapi import Depends, FastAPI, HTTPException, status, Request, \
+    File, UploadFile, APIRouter, Form, BackgroundTasks
 from fastapi.responses import HTMLResponse, StreamingResponse
 
 from starlette.staticfiles import StaticFiles
@@ -13,11 +13,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 import uuid
 import secrets
-import shutil
 import os
 import sys
 import json
-import subprocess
+# import subprocess
 
 from quetz import auth_github
 from quetz.config import Config
@@ -29,6 +28,7 @@ from quetz import authorization
 from .condainfo import CondaInfo
 from quetz import channel_data
 from quetz import repo_data
+from quetz import indexing
 
 app = FastAPI()
 
@@ -375,27 +375,30 @@ def post_api_key(
 @api_router.post('/channels/{channel_name}/packages/{package_name}/files/', status_code=201,
           tags=['files'])
 def post_file(
+        background_tasks: BackgroundTasks,
         files: List[UploadFile] = File(...),
         force: Optional[bool] = Form(None),
         package: db_models.Package = Depends(get_package_or_fail),
         dao: Dao = Depends(get_dao),
         auth: authorization.Rules = Depends(get_rules)):
-
-    handle_package_files(package.channel.name, files, dao, auth, force, package=package)
+    handle_package_files(package.channel.name, files, dao, auth, force,
+                         background_tasks, package=package)
 
 
 @api_router.post('/channels/{channel_name}/files/', status_code=201, tags=['files'])
 def post_file(
+        background_tasks: BackgroundTasks,
         files: List[UploadFile] = File(...),
         force: Optional[bool] = Form(None),
         channel: db_models.Channel = Depends(get_channel_or_fail),
         dao: Dao = Depends(get_dao),
         auth: authorization.Rules = Depends(get_rules)):
+    handle_package_files(channel.name, files, dao, auth, force,
+                         background_tasks)
 
-    handle_package_files(channel.name, files, dao, auth, force)
 
-
-def handle_package_files(channel_name, files, dao, auth, force, package=None):
+def handle_package_files(channel_name, files, dao, auth, force,
+                         background_tasks, package=None):
     if force:
         auth.assert_overwrite_package_version(channel_name)
 
@@ -453,20 +456,25 @@ def handle_package_files(channel_name, files, dao, auth, force, package=None):
     # TODO:
     # subprocess.run(['conda', 'index', channel_dir])
 
+    # Background task to update indexes
+    background_tasks.add_task(indexing.update_indexes,
+                              dao, pkgstore, channel_name)
+
 
 # Test code
 @api_router.get('/channeldata/{channel_name}')
 def get_channeldata(channel: db_models.Channel = Depends(get_channel_or_fail),
-                    dao = Depends(get_dao)):
-    return json.loads(channel_data.export(dao, channel.name))
+                    dao=Depends(get_dao)):
+    return channel_data.export(dao, channel.name)
+
 
 @api_router.get('/repodata/{channel_name}/{subdir}')
 def get_repodata(channel: db_models.Channel = Depends(get_channel_or_fail),
                  subdir: str = "noarch",
-                 dao = Depends(get_dao)):
+                 dao=Depends(get_dao)):
     data = repo_data.export(dao, channel.name, subdir)
     if data:
-        return json.loads(data)
+        return data
     else:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -483,16 +491,19 @@ def invalid_api():
     return None
 
 
-@app.get("/channels/{channel_name}/{package:path}")
-def serve_package(
-        package,
+@app.get("/channels/{channel_name}/{path:path}")
+def serve_path(
+        path,
         channel: db_models.Channel = Depends(get_channel_or_fail)):
+    if path.endswith("/"):
+        # need to serve up an index.html equivalent
+        pass
     try:
-        return StreamingResponse(pkgstore.serve_package(channel.name, package))
+        return StreamingResponse(pkgstore.serve_path(channel.name, path))
     except FileNotFoundError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f'{channel.name}/{package} not found')
+            detail=f'{channel.name}/{path} not found')
 
 
 if os.path.isfile('quetz_frontend/dist/index.html'):

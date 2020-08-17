@@ -29,8 +29,13 @@ class PackageStore(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def serve_package(self, channel, package):
+    def add_file(self, channel, data, dest):
         pass
+
+    @abc.abstractmethod
+    def serve_path(self, channel, path):
+        pass
+
 
 class LocalStore(PackageStore):
     def __init__(self, config):
@@ -44,11 +49,25 @@ class LocalStore(PackageStore):
         full_path = path.join(self.channels_dir, channel, dest)
         self.fs.makedirs(path.dirname(full_path), exist_ok=True)
 
-        with self.fs.open(full_path, "wb") as pkg:
-            shutil.copyfileobj(src, pkg)
+        with self.fs.transaction:
+            with self.fs.open(full_path, "wb") as pkg:
+                shutil.copyfileobj(src, pkg)
 
-    def serve_package(self, channel, package):
-        return self.fs.open(path.join(self.channels_dir, channel, package)).f
+    def add_file(self, channel, data, dest):
+        full_path = path.join(self.channels_dir, channel, dest)
+        self.fs.makedirs(path.dirname(full_path), exist_ok=True)
+
+        if type(data) is str:
+            mode = "w"
+        else:
+            mode = "wb"
+
+        with self.fs.transaction:
+            with self.fs.open(full_path, mode) as f:
+                f.write(data)
+
+    def serve_path(self, channel, path):
+        return self.fs.open(path.join(self.channels_dir, channel, path)).f
 
 
 class S3Store(PackageStore):
@@ -88,10 +107,23 @@ class S3Store(PackageStore):
     def add_package(self, channel, src, dest):
         with self._get_fs() as fs:
             bucket = self._bucket_map(channel)
-            with fs.open(path.join(bucket, dest), "wb") as pkg:
-                shutil.copyfileobj(src, pkg)
+            with fs.transaction:
+                with fs.open(path.join(bucket, dest), "wb") as pkg:
+                    shutil.copyfileobj(src, pkg)
 
-    def serve_package(self, channel, package):
+    def add_file(self, channel, data, dest):
+        if type(data) is str:
+            mode = "w"
+        else:
+            mode = "wb"
+
+        with self._get_fs() as fs:
+            bucket = self._bucket_map(channel)
+            with fs.transaction:
+                with fs.open(path.join(bucket, dest), mode) as f:
+                    f.write(data)
+
+    def serve_path(self, channel, path):
         with self._get_fs() as fs:
             return fs.open(
-                path.join(self._bucket_map(channel), package))
+                path.join(self._bucket_map(channel), path))
